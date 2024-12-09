@@ -2,7 +2,7 @@
 
 ![GitHub Stars](https://img.shields.io/github/stars/c0de-z/Lua-Simulator-V2?style=flat-square)
 ![GitHub Issues](https://img.shields.io/github/issues/c0de-z/Lua-Simulator-V2?style=flat-square)
-![License](https://img.shields.io/github/license/c0de-z/Lua-Simulator-V2?style=flat-square)
+![License](https://img.shields.io/github/license/c0dez/Lua-Simulator-V2)
 
 An enhanced and upgraded version of the original Lua-Sim designed for **EdgeTX**.
 
