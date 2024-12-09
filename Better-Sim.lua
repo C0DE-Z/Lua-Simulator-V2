@@ -2,585 +2,481 @@
 -- OG Author: Alexey Stankevich @AlexeyStn
 -- Mod by CodeZ
 
--- Initialize drone position and speed
-local drone = {x = 0, y = 0, z = 0}
-local speed = {x = 0, y = 0, z = 0}
-
-local lowFps = false
-local fpsCounter = 0
-
-local gate = {w = 30, h = 30}
-local flag = {w = 6, h = 30}
-local track = {w = 50, h = 80}
-
-local rollScale = 50
-local pitchScale = 50
-local throttleScale = 150
-
-local minSpeed = 3
-
-local objectsN = 2
-local objects = {}
-local zObjectsStep = 1500
-
-local zScale = 300
-
-local raceTime = 30
-local startTime
-local finishTime
-local countDown
-
-local raceStarted = false
-local startTonePlayed = false
-local counter = nil
-
-local objectCounter = 0
-local bestResultPath = "/SCRIPTS/simulator.txt"
-local isNewBest = false
-
--- Initialize yaw control and gravity
-local yawScale = 50
-local gravity = 9.81
-local deltaTime = 0.02 -- 20ms per frame
-local maxTilt = math.rad(45) -- Maximum tilt angle in radians (45 degrees)
-
--- Add air resistance and max speed
-local airResistance = 0.98 -- Air resistance factor (1 = no resistance, 0 = full resistance)
-local maxSpeed = 200 -- Maximum speed in units per second
-
--- Add drone weight variable
-local droneWeight = 1.0 -- Default weight
-
--- Add state variable and parameters for options screen
-local state = "title"
-local options = {
-  {name = "Drone Weight", value = 1.0, min = 0.1, max = 5.0, step = 0.1},
-  {name = "Race Time", value = 30, min = 10, max = 300, step = 10},
-  -- Add more parameters if needed
+local config = {
+  gate = {w = 30, h = 30},
+  phys = {
+    dt = 0.02,
+    g = 9.81,
+    air = 0.98,
+    maxTilt = math.rad(360),  -- Allow full rotation in ACRO
+    scale = {roll = 25, pitch = 25, yaw = 5, throttle = 40, gravity = 0.4}, -- Reduced throttle scaling
+    maxSpeed = 27.7, -- ~100 km/h in m/s
+    maxAltitude = 200,  -- Maximum altitude in meters
+    minAltitude = -5,    -- Minimum altitude (slightly below ground)
+    momentum = 0.85, -- Add momentum factor
+    groundLevel = 0,  -- Define ground level
+  },
+  zStep = 1000,  -- Reduced step between gates
+  zScale = 300,
+  renderDist = 2000,  -- Maximum render distance
+  lastFrameTime = 0,
+  frameSkip = 0,  -- Current frame skip counter
+  menuRefreshRate = 4,  -- Menu updates 4 times per second
+  menuLastUpdate = 0,
+  menuBuffer = {},      -- Cache for menu items
+  display = {
+    compass = {
+      radius = 15,
+      y = 15,
+      directions = {"N", "E", "S", "W"}
+    },
+    ground = {
+      lines = 8,    -- Number of ground perspective lines
+      spacing = 20  -- Spacing between lines
+    }
+  },
 }
-local selectedOption = 1
 
--- Add near the top with other state variables
-local transitionStart = 0
-local transitionDuration = 100 -- 1 second
-local transitionText = ""
+-- Core state
+local drone = {x = 0, y = 0, z = 0, roll = 0, pitch = 0, yaw = 0}
+local speed = {x = 0, y = 0, z = 0}
+local state = "title"
+local counter = 0
+local selectedOption = 1  -- Add this line
+local editingValue = false  -- Add this line
 
--- Move this function before it's used
+-- Define activeGates before it's used
+local activeGates = {
+  {x = 0, y = 0, z = 500, passed = false},  -- Current gate
+  {x = 0, y = 0, z = 1500, passed = false}  -- Next gate
+}
+
+-- Add back original options
+local options = {
+  {name = "Weight", value = 500, min = 100, max = 2000, step = 50},  -- In grams now
+  {name = "Time", value = 30, min = 10, max = 300, step = 10},
+  {name = "Mode", value = 2, min = 1, max = 3, step = 1,  -- Changed default to 2 (ANGLE)
+   labels = {"ACRO", "ANGLE", "HOR"}},
+  {name = "Debug", value = 0, min = 0, max = 1, step = 1,
+   labels = {"OFF", "ON"}},
+  {name = "FPS Limit", value = 20, min = 10, max = 30, step = 5},  -- New FPS limit option
+  {name = "Frame Skip", value = 0, min = 0, max = 2, step = 1},    -- New frame skip option
+  {name = "Turn Rate", value = 100, min = 50, max = 200, step = 10},  -- Added turn rate setting
+  {name = "START", isButton = true}
+}
+
+-- Add back necessary helper functions
 local function applyRotation(x, y, angle)
   local cos = math.cos(angle)
   local sin = math.sin(angle)
   return x * cos - y * sin, x * sin + y * cos
 end
 
--- Helper functions
-local function clampAngle(angle)
-  return math.max(-maxTilt, math.min(maxTilt, angle))
+-- Add this helper function first
+local function calculateSpeed()
+  -- Only use horizontal speed components
+  return math.sqrt(speed.x^2 + speed.z^2)
 end
 
-local function loadBestResult()
-  local f = io.open(bestResultPath, "r")
-  if f == nil then
-    return nil
+-- Add race lines state
+local raceLines = {}
+for i=1, 8 do
+  raceLines[i] = {x = (i-4.5)*200, z = -1000}
+end
+
+-- Add these helper functions after the existing helpers
+local function drawArrow(x, y, angle, size)
+  local cos = math.cos(angle)
+  local sin = math.sin(angle)
+  
+  local x1 = x + size * cos
+  local y1 = y + size * sin
+  local x2 = x + size/2 * math.cos(angle + math.rad(140))
+  local y2 = y + size/2 * math.sin(angle + math.rad(140))
+  local x3 = x + size/2 * math.cos(angle - math.rad(140))
+  local y3 = y + size/2 * math.sin(angle - math.rad(140))
+  
+  lcd.drawLine(x, y, x1, y1, SOLID, FORCE)
+  lcd.drawLine(x1, y1, x2, y2, SOLID, FORCE)
+  lcd.drawLine(x1, y1, x3, y3, SOLID, FORCE)
+end
+
+-- Replace existing drawObject function
+local function drawGate(gate)
+  if not gate or gate.z <= drone.z then return end
+  
+  local x, z = gate.x - drone.x, gate.z - drone.z
+  -- Quick distance check
+  if z > config.renderDist then return end
+  
+  x, z = applyRotation(x, z, -drone.yaw)
+  if z <= 0 then return end
+  
+  local scale = config.zScale / math.max(1, z)  -- Prevent division by zero
+  local sx = x * scale + LCD_W/2
+  local sy = LCD_H/2 + (drone.y - gate.y) * scale  -- Fix vertical perspective
+  
+  -- Quick screen bounds check
+  if sx < -50 or sx > LCD_W + 50 then return end
+  
+  local w = config.gate.w * scale / 2
+  local h = config.gate.h * scale
+  
+  -- Simplified gate drawing
+  lcd.drawLine(sx - w, sy, sx + w, sy, SOLID, FORCE)
+  lcd.drawLine(sx - w, sy - h, sx + w, sy - h, SOLID, FORCE)
+  lcd.drawLine(sx - w, sy, sx - w, sy - h, SOLID, FORCE)
+  lcd.drawLine(sx + w, sy, sx + w, sy - h, SOLID, FORCE)
+end
+
+-- Fix updatePhysics function
+local function updatePhysics()
+  local thr = getValue('thr') / 512
+  local roll = getValue('ail') / 512
+  local pitch = getValue('ele') / 512
+  local yaw = getValue('rud') / 512
+  
+  -- Scale inputs
+  thr = thr * config.phys.scale.throttle
+  roll = roll * config.phys.scale.roll
+  pitch = pitch * config.phys.scale.pitch
+  yaw = yaw * config.phys.scale.yaw * (options[7].value / 100)
+  
+  local mode = options[3].value
+  if mode == 1 then -- ACRO
+    -- Full freedom of movement
+    drone.roll = (drone.roll + roll * config.phys.dt) % (2 * math.pi)
+    drone.pitch = (drone.pitch + pitch * config.phys.dt) % (2 * math.pi)
+  else -- ANGLE/HOR
+    -- Restrict movement to left/right/forward/back
+    local targetRoll = roll * math.rad(30)  -- Max 30 degree tilt
+    local targetPitch = pitch * math.rad(30)
+    drone.roll = drone.roll * 0.85 + targetRoll * 0.15
+    drone.pitch = 0  -- Lock pitch for level flight
   end
-  result = tonumber(io.read(f, 3))
-  return result
+  
+  -- Update yaw
+  drone.yaw = (drone.yaw + yaw * config.phys.dt) % (2 * math.pi)
+  
+  -- Calculate forces
+  local thrust = math.max(0, thr) * config.phys.dt * 8
+  local gravity = config.phys.g * config.phys.scale.gravity * config.phys.dt
+  
+  -- Update velocities based on mode
+  if mode == 1 then -- ACRO
+    -- Full physics
+    speed.x = (speed.x + thrust * math.sin(drone.roll)) * config.phys.air
+    speed.y = (speed.y + thrust * math.cos(drone.roll) - gravity) * config.phys.air
+    speed.z = (speed.z + thrust * math.sin(drone.pitch)) * config.phys.air
+  else -- ANGLE/HOR
+    -- Simplified movement
+    speed.x = (roll * config.phys.scale.roll) * config.phys.air
+    speed.y = (thrust - gravity) * config.phys.air
+    speed.z = (-pitch * config.phys.scale.pitch) * config.phys.air
+  end
+  
+  -- Update position with ground constraint
+  drone.x = drone.x + speed.x
+  drone.y = math.max(config.phys.groundLevel, 
+                    drone.y + speed.y)
+  drone.z = drone.z + speed.z
+  
+  -- Ground collision
+  if drone.y <= config.phys.groundLevel then
+    speed.y = 0
+    drone.y = config.phys.groundLevel
+  end
+  
+  -- Optimized gate collision check
+  for i, gate in ipairs(activeGates) do
+    if not gate.passed and 
+       math.abs(gate.z - drone.z) < config.gate.w and
+       math.abs(gate.x - drone.x) < config.gate.w and
+       math.abs(gate.y - drone.y) < config.gate.h then
+      gate.passed = true
+      counter = counter + 1
+      playGateSound()
+      
+      -- Move gate ahead efficiently
+      gate.z = math.max(activeGates[1].z, activeGates[2].z) + config.zStep
+      gate.x = math.random(-100, 100)
+      gate.y = config.phys.groundLevel
+      gate.passed = false
+    end
+  end
 end
 
-local function saveBestResult(result)
-  local f = io.open(bestResultPath, "w")
-  io.write(f, tostring(result))  -- Use tostring instead of string.format
-  io.close(f)
+local showDebug = false
+local currentFlightMode = "ACRO"
+local currentSpeed = 0
+
+local function drawLandscape()
+  -- Simple ground reference
+  lcd.drawLine(0, LCD_H/2, LCD_W, LCD_H/2, DOTTED, FORCE)
+  lcd.drawLine(LCD_W/2, LCD_H/2-5, LCD_W/2, LCD_H/2+5, SOLID, FORCE)
 end
 
-local function drawBorder(x1, y1, x2, y2) -- 1 far, 2 close
-  if x1 == x2 then -- vertical
-    if y2 >= LCD_H then y2 = LCD_H - 1 end
-  else -- diagonal
-    a = (y2 - y1) / (x2 - x1)
-    b = (y1 * x2 - y2 * x1) / (x2 - x1)
-    x0 = 0
-    y0 = x0 * a + b
-    if a < 0 and y0 < LCD_H and y0 >= (LCD_H/2 + 1) then -- left side
-      x2 = x0
-      y2 = y0
-    else
-      x0 = (LCD_W - 1)
-      y0 = x0 * a + b
-      if a > 0 and y0 < LCD_H and y0 >= (LCD_H/2 + 1) then -- right side
-        x2 = x0
-        y2 = y0
-      else -- bottom side
-        p = (LCD_H - 1 - y1) / (y2 - y1)
-        y2 = LCD_H - 1
-        x2 = x1 + (x2 - x1) * p
-        if x2 < 0 then x2 = 0 end
-        if x2 >= LCD_W then x2 = LCD_W - 1 end
+local function drawDebugInfo()
+  lcd.drawText(2, 12, "X:" .. math.floor(drone.x), SMLSIZE)
+  lcd.drawText(2, 22, "Y:" .. math.floor(drone.y), SMLSIZE)
+  lcd.drawText(2, 32, "Z:" .. math.floor(drone.z), SMLSIZE)
+end
+
+local function drawRaceLines()
+  for _, line in ipairs(raceLines) do
+    local x, z = line.x - drone.x, line.z - drone.z
+    x, z = applyRotation(x, z, -drone.yaw)
+    if z > 0 then
+      local scale = config.zScale / z
+      local sx = x * scale + LCD_W/2
+      if sx >= 0 and sx <= LCD_W then
+        lcd.drawLine(sx, LCD_H/2-5, sx, LCD_H/2+5, DOTTED, FORCE)
       end
     end
   end
-  lcd.drawLine(x1, y1, x2, y2, DOTTED, FORCE)
 end
 
-local function drawLandscape()
-  -- Add ground grid for better depth perception
-  local gridSize = 50
-  local gridLines = 10
-  for i = -gridLines, gridLines do
-    local x1 = i * gridSize
-    local z1 = -100
-    local x2 = i * gridSize
-    local z2 = 1000
-    
-    -- Project grid lines with perspective
-    local sx1 = (x1 * zScale) / z1 + LCD_W/2
-    local sy1 = LCD_H - 10  -- Near line
-    local sx2 = (x2 * zScale) / z2 + LCD_W/2
-    local sy2 = LCD_H/2 + 20  -- Far line
-    
-    -- Apply rotation
-    sx1, sy1 = applyRotation(sx1 - LCD_W/2, sy1 - LCD_H/2, drone.roll)
-    sx2, sy2 = applyRotation(sx2 - LCD_W/2, sy2 - LCD_H/2, drone.roll)
-    sx1, sy1 = sx1 + LCD_W/2, sy1 + LCD_H/2
-    sx2, sy2 = sx2 + LCD_W/2, sy2 + LCD_H/2
-    
-    lcd.drawLine(sx1, sy1, sx2, sy2, DOTTED, FORCE)
+-- Add feedback functions
+local function playGateSound()
+  -- High-pitched success tone
+  playTone(1500, 100, 0)
+  -- Medium vibration
+  playHaptic(20, 0, 0)
+end
+
+local function playSettingHaptic()
+  -- Light haptic feedback
+  playHaptic(10, 0, 0)
+end
+
+-- Add power optimization helpers after config
+local function shouldUpdateMenu()
+  local now = getTime()
+  if now - config.menuLastUpdate >= (500 / config.menuRefreshRate) then
+    config.menuLastUpdate = now
+    return true
   end
+  return false
+end
+
+-- Add horizon line drawing function
+local function drawHorizon()
+  local roll = drone.roll
+  local pitch = drone.pitch
+  local length = LCD_W * 0.8
+  local cx = LCD_W/2
+  local cy = LCD_H/2
   
   -- Draw artificial horizon
-  -- Apply camera transformation based on drone orientation
-  local horizonTilt = -drone.roll
-  local horizonShift = drone.pitch * 30  -- Adjust multiplier as needed
+  local dx = math.sin(roll) * length/2
+  local dy = math.cos(roll) * length/2
+  local py = pitch * 10  -- Pitch sensitivity
   
-  -- Draw tilted horizon line
-  local x1, y1 = 0, LCD_H/2 + horizonShift
-  local x2, y2 = LCD_W-1, LCD_H/2 + horizonShift
-  
-  -- Rotate horizon line around screen center
-  local centerX, centerY = LCD_W/2, LCD_H/2
-  x1, y1 = applyRotation(x1 - centerX, y1 - centerY, horizonTilt)
-  x2, y2 = applyRotation(x2 - centerX, y2 - centerY, horizonTilt)
-  x1, y1 = x1 + centerX, y1 + centerY
-  x2, y2 = x2 + centerX, y2 + centerY
-  
-  lcd.drawLine(x1, y1, x2, y2, DOTTED, FORCE)
+  lcd.drawLine(cx - dx, cy - dy + py, cx + dx, cy + dy + py, SOLID, FORCE)
+end
+
+-- Replace the drawNavArrow function
+local function drawNavArrow()
+  local nextGate = activeGates[1]
+  if nextGate.z > drone.z then
+    local dx = nextGate.x - drone.x
+    local dz = nextGate.z - drone.z
+    
+    -- Calculate relative angle to gate accounting for drone's yaw
+    local targetAngle = math.atan2(dx, dz)
+    local relativeAngle = (targetAngle - drone.yaw) % (2 * math.pi)
+    
+    -- Draw arrow at bottom of screen
+    drawArrow(LCD_W/2, LCD_H-10, relativeAngle, 15)
+  end
+end
+
+-- Improved ground drawing
+local function drawGround()
+  -- Draw horizon line
+  lcd.drawLine(0, LCD_H/2, LCD_W, LCD_H/2, SOLID, FORCE)
   
   -- Draw perspective lines
-  -- ...rest of landscape drawing code...
-end
-
-local function drawLine(x1, y1, x2, y2, flag)
-  if flag == 'h' then
-    if y1 < 0 or y1 > LCD_H then return 0 end
-    if x1 < 0 and x2 < 0 then return 0 end
-    if x1 >= LCD_W and x2 >= LCD_W then return 0 end
-    if x1 < 0 then x1 = 0 end
-    if x2 < 0 then x2 = 0 end
-    if x1 >= LCD_W then x1 = LCD_W - 1 end
-    if x2 >= LCD_W then x2 = LCD_W - 1 end
-    lcd.drawLine(x1, y1, x2, y2, SOLID, FORCE)
-    return 0
-  end
-  if flag == 'v' then
-    if x1 < 0 or x1 > LCD_W then return 0 end
-    if y1 < 0 and y2 < 0 then return 0 end
-    if y1 >= LCD_H and y2 >= LCD_H then return 0 end
-    if y1 < 0 then y1 = 0 end
-    if y2 < 0 then y2 = 0 end
-    if y1 >= LCD_H then y1 = LCD_H - 1 end
-    if y2 >= LCD_H then y2 = LCD_H - 1 end
-    lcd.drawLine(x1, y1, x2, y2, SOLID, FORCE)
-    return 0
+  local spacing = config.display.ground.spacing
+  for i=1, config.display.ground.lines do
+    local y = LCD_H/2 + i * spacing
+    local x1 = LCD_W/2 - (i * spacing)
+    local x2 = LCD_W/2 + (i * spacing)
+    lcd.drawLine(x1, y, x2, y, DOTTED, FORCE)
   end
 end
 
-local function drawMarker(x, y)
-  if x < 0 then x = 1 end
-  if x >= LCD_W then x = LCD_W - 2 end
-  if y < 0 then yP = 1 end
-  if y >= LCD_W then y = LCD_H - 2 end
-  lcd.drawLine(x - 1, y - 1, x - 1, y + 1, SOLID, FORCE)
-  lcd.drawLine(x    , y - 1, x    , y + 1, SOLID, FORCE)
-  lcd.drawLine(x + 1, y - 1, x + 1, y + 1, SOLID, FORCE)
-end
-
-local function drawObject(object, markerFlag)
-  x = object.x - drone.x
-  y = object.y - drone.y
-  z = object.z - drone.z
-  if object.t == "gateGround" then
-    xDispLeft = ((x - gate.w/2) * zScale) / z + LCD_W/2
-    xDispRight = ((x + gate.w/2) * zScale) / z + LCD_W/2
-    yDispTop = ((y - gate.h) * zScale) / z + LCD_H/2
-    yDispBottom = ((y + 0) * zScale) / z + LCD_H/2
-    xDispMarker = (x * zScale) / z + LCD_W/2
-    yDispMarker = ((y - gate.h/2) * zScale) / z + LCD_H/2
-    drawLine(xDispLeft, yDispBottom, xDispLeft, yDispTop, 'v')
-    drawLine(xDispRight, yDispBottom, xDispRight, yDispTop, 'v')
-    drawLine(xDispLeft, yDispTop, xDispRight, yDispTop, 'h')
-  elseif object.t == "gateAir" then
-    xDispLeft = ((x - gate.w/2) * zScale) / z + LCD_W/2
-    xDispRight = ((x + gate.w/2) * zScale) / z + LCD_W/2
-    yDispTop = ((y - gate.h*2) * zScale) / z + LCD_H/2
-    yDispMid = ((y - gate.h) * zScale) / z + LCD_H/2
-    yDispBottom = ((y + 0) * zScale) / z + LCD_H/2
-    xDispMarker = (x * zScale) / z + LCD_W/2
-    yDispMarker = ((y - gate.h*3/2) * zScale) / z + LCD_H/2
-    drawLine(xDispLeft, yDispBottom, xDispLeft, yDispTop, 'v')
-    drawLine(xDispRight, yDispBottom, xDispRight, yDispTop, 'v')
-    drawLine(xDispLeft, yDispTop, xDispRight, yDispTop, 'h')
-    drawLine(xDispLeft, yDispMid, xDispRight, yDispMid, 'h')
-  elseif object.t == "flagLeft" then
-    xDispLeft = ((x - flag.w/2) * zScale) / z + LCD_W/2
-    xDispRight = ((x + flag.w/2) * zScale) / z + LCD_W/2
-    yDispTop = ((y - gate.h*2) * zScale) / z + LCD_H/2
-    yDispMid = ((y - gate.h) * zScale) / z + LCD_H/2
-    yDispBottom = ((y + 0) * zScale) / z + LCD_H/2
-    xDispMarker = ((x + flag.w*2) * zScale) / z + LCD_W/2
-    yDispMarker = ((y - gate.h*3/2) * zScale) / z + LCD_H/2
-    drawLine(xDispLeft, yDispMid, xDispLeft, yDispTop, 'v')
-    drawLine(xDispRight, yDispBottom, xDispRight, yDispTop, 'v')
-    drawLine(xDispLeft, yDispTop, xDispRight, yDispTop, 'h')
-    drawLine(xDispLeft, yDispMid, xDispRight, yDispMid, 'h')
-  elseif object.t == "flagRight" then
-    xDispLeft = ((x - flag.w/2) * zScale) / z + LCD_W/2
-    xDispRight = ((x + flag.w/2) * zScale) / z + LCD_W/2
-    yDispTop = ((y - gate.h*2) * zScale) / z + LCD_H/2
-    yDispMid = ((y - gate.h) * zScale) / z + LCD_H/2
-    yDispBottom = ((y + 0) * zScale) / z + LCD_H/2
-    xDispMarker = ((x - flag.w*2) * zScale) / z + LCD_W/2
-    yDispMarker = ((y - gate.h*3/2) * zScale) / z + LCD_H/2
-    drawLine(xDispLeft, yDispBottom, xDispLeft, yDispTop, 'v')
-    drawLine(xDispRight, yDispMid, xDispRight, yDispTop, 'v')
-    drawLine(xDispLeft, yDispTop, xDispRight, yDispTop, 'h')
-    drawLine(xDispLeft, yDispMid, xDispRight, yDispMid, 'h')
-  end
-  if markerFlag then
-    drawMarker(xDispMarker, yDispMarker)
-  end
-end
-
-local function generateObject()
-  objectCounter = objectCounter + 1
-  distance = objectCounter * zObjectsStep
-  object = {x = math.random(-track.w, track.w), y = 0, z = distance}
-  typeId = math.random(1,6)
-  if typeId == 1 or typeId == 2 then
-    object.t = "gateGround"
-  elseif typeId == 3 or typeId == 4 then
-    object.t = "gateAir"
-  elseif typeId == 5 then
-    object.t = "flagRight"
-    object.x = - math.abs(object.x) - track.w
-  elseif typeId == 6 then
-    object.t = "flagLeft"
-    object.x = math.abs(object.x) + track.w
-  end
-  return object
-end
-
-local function init_func()
-  if lowFps then
-    rollScale = rollScale / 2
-    pitchScale = pitchScale / 2
-    throttleScale = throttleScale / 2
-  end
-  bestResult = loadBestResult()
-  state = "title"
-end
-
--- Add near the top with other event handlers
-local EVT_VIRTUAL_NEXT = EVT_VIRTUAL_INC -- Scroll wheel next
-local EVT_VIRTUAL_PREV = EVT_VIRTUAL_DEC -- Scroll wheel previous
-
+-- Simplified run function
 local function run_func(event)
+  if event == nil then event = 0 end  -- Add this line
+  
+  -- Skip frame timing for title screen
   if state == "title" then
-    -- Display title screen
     lcd.clear()
     lcd.drawText(LCD_W/2 - 47, 28, "Lua FPV Simulator V2", BOLD)
     lcd.drawText(LCD_W/2 - 47, 40, "Mod By CodeZ!")
     lcd.drawText(LCD_W/2 - 59, 54, "Press [Enter] to continue")
-
-    if event == EVT_ENTER_BREAK then
-      state = "options"
-    end
-
+    if event == EVT_ENTER_BREAK then state = "options" end
+    
+  -- Optimize menu state
   elseif state == "options" then
+    -- Only update menu on event or refresh timer
+    if event == 0 and not shouldUpdateMenu() then
+      return 0
+    end
+    
     lcd.clear()
-    -- Center align title
+    -- Draw settings header
     lcd.drawText(LCD_W/2 - 30, 2, "Settings", BOLD + INVERS)
     
-    -- Draw options more to the left and centered vertically
-    local startY = LCD_H/2 - (#options * 10)
-    for i, option in ipairs(options) do
-      local y = startY + (i - 1) * 20 -- Increased spacing between options
-      local attr = (i == selectedOption) and INVERS or 0
-      -- Draw option name left-aligned
-      lcd.drawText(10, y, option.name .. ":", attr)
-      -- Draw value right-aligned
-      lcd.drawNumber(LCD_W - 20, y, option.value * (option.name == "Drone Weight" and 10 or 1), 
-                    attr + (option.name == "Drone Weight" and PREC1 or 0))
-    end
+    -- Calculate visible options
+    local visibleOptions = 4
+    local startIdx = math.max(1, math.min(selectedOption - visibleOptions + 1, #options - visibleOptions + 1))
+    local endIdx = math.min(startIdx + visibleOptions - 1, #options)
     
-    -- Center align bottom instruction
-    lcd.drawText(LCD_W/2 - 50, LCD_H - 8, "ENTER: Start  EXIT: Back", 0)
-
-    -- Handle navigation including scroll wheel
-    if event == EVT_MINUS_BREAK or event == EVT_VIRTUAL_PREV then
-      selectedOption = (selectedOption > 1) and (selectedOption - 1) or #options
-    elseif event == EVT_PLUS_BREAK or event == EVT_VIRTUAL_NEXT then
-      selectedOption = (selectedOption < #options) and (selectedOption + 1) or 1
-    elseif event == EVT_VIRTUAL_INC then -- Scroll wheel right
-      local option = options[selectedOption]
-      option.value = math.min(option.value + option.step, option.max)
-    elseif event == EVT_VIRTUAL_DEC then -- Scroll wheel left
-      local option = options[selectedOption]
-      option.value = math.max(option.value - option.step, option.min)
-    elseif event == EVT_UP_BREAK then
-      local option = options[selectedOption]
-      option.value = math.min(option.value + option.step, option.max)
-    elseif event == EVT_DOWN_BREAK then
-      local option = options[selectedOption]
-      option.value = math.max(option.value - option.step, option.min)
-    elseif event == EVT_ENTER_BREAK then
-      -- Apply adjusted parameters
-      droneWeight = options[1].value
-      raceTime = options[2].value
-      state = "countdown"
-      -- Initialize race variables
-      startTime = getTime() + 300 -- 3 seconds countdown
-      finishTime = startTime + raceTime * 100
-      countDown = 3
-      -- Reset drone position and speed
-      drone.x = 0
-      drone.y = 0
-      drone.z = 0
-      speed.x = 0
-      speed.y = 0
-      speed.z = 0
-      drone.roll = 0
-      drone.pitch = 0
-      drone.yaw = 0
-      -- Generate initial objects
-      objectCounter = 0
-      objects = {}
-      for i = 1, objectsN do
-        objects[i] = generateObject()
-      end
-      counter = 0
-      startTonePlayed = false
-    end
-
-    if event == EVT_EXIT_BREAK then
-      state = "title"
-    end
-
-  elseif state == "countdown" then
-    lcd.clear()
-    local cnt = math.floor((startTime - getTime()) / 100) + 1
-    if cnt ~= countDown then
-      playTone(1500, 100, 0)
-      countDown = cnt
-    end
-    if cnt <= 0 then
-      state = "transition"
-      transitionStart = getTime()
-      transitionText = "LIFTOFF!"
-      playTone(2250, 500, 0)
-    else
-      lcd.drawText(LCD_W/2 - 6, LCD_H/2 - 8, tostring(cnt), DBLSIZE + BOLD)
-    end
-
-  elseif state == "transition" then
-    lcd.clear()
-    local progress = (getTime() - transitionStart) / transitionDuration
-    
-    -- Calculate scaling effect (starts big, shrinks to normal)
-    local scale = 3 - (2 * progress) -- Scale from 3x to 1x
-    if scale < 1 then scale = 1 end
-    
-    -- Calculate alpha (fade in then out)
-    local alpha = math.sin(progress * math.pi) * 15
-    if alpha < 0 then alpha = 0 end
-    
-    -- Draw centered text with effect
-    local textWidth = #transitionText * (8 * scale) -- Approximate width
-    local x = LCD_W/2 - textWidth/2
-    local y = LCD_H/2 - (8 * scale)
-    lcd.drawText(x, y, transitionText, DBLSIZE + BOLD + INVERS)
-    
-    -- Transition to race state when done
-    if progress >= 1.0 then
-      state = "race"
-    end
-
-  elseif state == "race" then
-    if lowFps then
-      -- skip frames to maintain performance
-      fpsCounter = fpsCounter + 1
-      if fpsCounter == 2 then
-        fpsCounter = 0
-        return 0
-      end
-    end
-    lcd.clear()
-    currentTime = getTime()
-    if currentTime < startTime then
-      -- Countdown before race starts
-      local cnt = (startTime - currentTime) / 100 + 1
-      if cnt < countDown then
-        playTone(1500, 100, 0)
-        countDown = countDown - 1
-      end
-      lcd.drawNumber(LCD_W/2 - 2, LCD_H - LCD_H/3, cnt, BOLD)
-    elseif currentTime < finishTime then
-      if (currentTime - startTime) < 100 then
-        lcd.drawText(LCD_W/2 - 6, 48, 'GO!', BOLD)
-        if not startTonePlayed then
-          playTone(2250, 500, 0)
-          startTonePlayed = true
-        end
-      end
-      -- Read control inputs and scale them appropriately
-      local throttleInput = (getValue('thr') / 512) * throttleScale
-      local rollInput = (getValue('ail') / 512) * rollScale
-      local pitchInput = (getValue('ele') / 512) * pitchScale
-      local yawInput = (getValue('rud') / 512) * yawScale
-
-      -- Update drone orientation
-      drone.roll = clampAngle(drone.roll + rollInput * deltaTime)
-      drone.pitch = clampAngle(drone.pitch - pitchInput * deltaTime)  -- Inverted for intuitive control
-      drone.yaw = drone.yaw + yawInput * deltaTime
-
-      -- Calculate thrust vector
-      local thrust = throttleInput * deltaTime
+    -- Draw options
+    for i = startIdx, endIdx do
+      local option = options[i]
+      local y = 15 + (i - startIdx) * 12
+      local attr = (i == selectedOption) and (editingValue and BLINK or INVERS) or 0
       
-      -- Calculate movement based on orientation
-      local forwardThrust = thrust * math.cos(drone.roll) * math.sin(-drone.pitch) * 2 -- Increased multiplier
-      local lateralThrust = thrust * math.sin(drone.roll)
-      local verticalThrust = thrust * math.cos(drone.roll) * math.cos(drone.pitch)
-
-      -- Apply yaw rotation to horizontal movement
-      local rotatedX, rotatedZ = applyRotation(forwardThrust, lateralThrust, drone.yaw)
-      
-      -- Update velocities with thrust and gravity
-      speed.x = (speed.x + rotatedX) * airResistance
-      speed.y = (speed.y + verticalThrust - gravity * deltaTime) * airResistance
-      speed.z = (speed.z + rotatedZ) * airResistance * 2 -- Increased forward momentum
-
-      -- Clamp speeds to maximum
-      local currentSpeed = math.sqrt(speed.x^2 + speed.y^2 + speed.z^2)
-      if currentSpeed > maxSpeed then
-          local factor = maxSpeed / currentSpeed
-          speed.x = speed.x * factor
-          speed.y = speed.y * factor
-          speed.z = speed.z * factor
-      end
-
-      -- Update drone position
-      drone.x = drone.x + speed.x * deltaTime
-      drone.y = drone.y + speed.y * deltaTime
-      drone.z = drone.z + speed.z * deltaTime
-
-      -- Prevent drone from going below ground level
-      if drone.y > 0 then
-        drone.y = 0
-        speed.y = 0
-        -- Add some ground friction
-        speed.x = speed.x * 0.8
-        speed.z = speed.z * 0.8
-      end
-
-      -- Display drone position and orientation
-      lcd.drawText(LCD_W - 60, 2, "X: " .. math.floor(drone.x*10)/10, SMLSIZE)
-      lcd.drawText(LCD_W - 60, 10, "Y: " .. math.floor(drone.y*10)/10, SMLSIZE)
-      lcd.drawText(LCD_W - 60, 18, "Z: " .. math.floor(drone.z*10)/10, SMLSIZE)
-      lcd.drawText(LCD_W - 60, 26, "Yaw: " .. math.floor(math.deg(drone.yaw)*10)/10, SMLSIZE)
-      lcd.drawText(LCD_W - 60, 34, "Pitch: " .. math.floor(math.deg(drone.pitch)*10)/10, SMLSIZE)  
-      lcd.drawText(LCD_W - 60, 42, "Roll: " .. math.floor(math.deg(drone.roll)*10)/10, SMLSIZE)
-    else
-      -- Race finished, check for new best result
-      if (not bestResult) or (counter > bestResult) then
-        isNewBest = true
-        saveBestResult(counter)
-        bestResult = counter
-      end
-      raceStarted = false
-      state = "results"  -- Transition to results screen
-    end
-    remainingTime = (finishTime - currentTime)/100 + 1
-    if remainingTime > raceTime then remainingTime = raceTime end
-    lcd.drawTimer(LCD_W - 25, 2, remainingTime)
-    local closestDist = drone.z + zObjectsStep * objectsN
-    for i = 1, objectsN do
-      if objects[i].z < closestDist and objects[i].z > (drone.z + speed.z) then
-        closestN = i
-        closestDist = objects[i].z
-      end
-    end
-    for i = 1, objectsN do
-      if drone.z >= objects[i].z then
-        success = false
-        if objects[i].t == "gateGround" then
-          if (math.abs(objects[i].x - drone.x) <= gate.w/2) and (drone.y > -gate.h) then
-            success = true
-          end
-        elseif objects[i].t == "gateAir" then
-          if (math.abs(objects[i].x - drone.x) <= gate.w/2) and (drone.y < -gate.h) and (drone.y > -2*gate.h) then
-            success = true
-          end
-        elseif objects[i].t == "flagLeft" then
-          if (objects[i].x < drone.x) and (drone.y > -2*gate.h) then
-            success = true
-          end
-        elseif objects[i].t == "flagRight" then
-          if (objects[i].x > drone.x) and (drone.y > -2*gate.h) then
-            success = true
-          end
-        end
-        if success then
-          counter = counter + 1
-          playTone(1000, 100, 0)
+      if option.isButton then
+        -- Draw button
+        if i == selectedOption then
+          lcd.drawFilledRectangle(5, y-1, LCD_W-10, 11, INVERS)
+          lcd.drawText(LCD_W/2 - 20, y, option.name, 0)
         else
-          counter = counter - 1
-          playTone(500, 300, 0)
+          lcd.drawText(LCD_W/2 - 20, y, option.name, 0)
         end
-        objects[i] = generateObject()
       else
-        drawObject(objects[i], i == closestN)
+        -- Draw normal option
+        lcd.drawText(10, y, option.name .. ":", 0)
+        if option.labels then
+          local label = option.labels[option.value] or "?"
+          lcd.drawText(LCD_W - 20, y, label, attr)
+        else
+          lcd.drawNumber(LCD_W - 20, y, option.value * (option.name == "Weight" and 10 or 1), 
+                        attr + (option.name == "Weight" and PREC1 or 0))
+        end
       end
     end
-    drawLandscape()
-    lcd.drawNumber(3, 2, counter)
-    if event == EVT_EXIT_BREAK then
-      raceStarted = false
-      counter = nil
-    end
-    -- Add visual direction indicator
-    local arrowSize = 10
-    local centerX = LCD_W/2
-    local centerY = LCD_H/2
-    lcd.drawLine(centerX - arrowSize, centerY, centerX + arrowSize, centerY, SOLID, FORCE)
-    lcd.drawLine(centerX, centerY - arrowSize, centerX, centerY + arrowSize, SOLID, FORCE)
-  elseif state == "results" then
-    -- Display results
-    lcd.clear()
-    lcd.drawText(LCD_W/2 - 27, 20, "Result:", 0)
-    lcd.drawNumber(LCD_W/2 + 12, 20, counter, DBLSIZE)
-    if isNewBest then
-      lcd.drawText(LCD_W/2 - 42, 2, "New best score!", 0)
+
+    -- Handle input
+    if event == EVT_ENTER_BREAK then
+      if options[selectedOption].isButton then
+        playSettingHaptic()
+        state = "race"
+      else
+        editingValue = not editingValue
+      end
+    elseif event == EVT_EXIT_BREAK then
+      if editingValue then
+        editingValue = false
+      else
+        selectedOption = 1
+        state = "title"
+      end
+    elseif editingValue then
+      local option = options[selectedOption]
+      local oldValue = option.value
+      if event == EVT_ROT_RIGHT or event == EVT_PLUS_BREAK then
+        option.value = math.min(option.value + option.step, option.max)
+        if oldValue ~= option.value then playSettingHaptic() end
+      elseif event == EVT_ROT_LEFT or event == EVT_MINUS_BREAK then
+        option.value = math.max(option.value - option.step, option.min)
+        if oldValue ~= option.value then playSettingHaptic() end
+      end
     else
-      lcd.drawText(LCD_W/2 - 37, 2, "Best score:", 0)
-      lcd.drawNumber(LCD_W/2 + 30, 2, bestResult, 0)
+      local oldSelection = selectedOption
+      if event == EVT_ROT_RIGHT or event == EVT_PLUS_BREAK then
+        selectedOption = math.min(selectedOption + 1, #options)
+      elseif event == EVT_ROT_LEFT or event == EVT_MINUS_BREAK then
+        selectedOption = math.max(selectedOption - 1, 1)
+      end
     end
-    lcd.drawText(LCD_W/2 - 50, LCD_H - 12, "Press [Enter] to restart", 0)
-
-    if event == EVT_ENTER_BREAK or event == EVT_EXIT_BREAK then
-      state = "title"
+  
+  -- Race state remains largely unchanged
+  elseif state == "race" then
+    -- Apply normal frame timing
+    local currentTime = getTime()
+    local frameTime = 1000 / options[5].value
+    if (currentTime - config.lastFrameTime) < frameTime then
+      return 0
     end
+    config.frameSkip = options[6].value
+    config.lastFrameTime = currentTime
 
+    lcd.clear()
+    updatePhysics()
+    drawGround()  -- Now this will work
+    drawCompass()  -- Make sure this matches the function name exactly
+    drawLandscape()
+    
+    -- Draw orientation aids
+    if options[3].value == 1 then  -- ACRO mode
+      drawHorizon()  -- Show artificial horizon
+    end
+    
+    drawRaceLines() -- Add race lines
+    
+    -- Update flight mode based on options
+    currentFlightMode = options[3].labels[options[3].value]
+    showDebug = (options[4].value == 1)
+    
+    -- Only draw active gates
+    for _, gate in ipairs(activeGates) do
+      drawGate(gate)
+    end
+    drawNavArrow()  -- Always show navigation arrow
+    
+    -- Show HUD
+    if showDebug then
+      drawDebugInfo()
+      -- Add attitude information
+      lcd.drawText(2, 42, "Roll:" .. math.floor(math.deg(drone.roll)), SMLSIZE)
+      lcd.drawText(2, 52, "Pitch:" .. math.floor(math.deg(drone.pitch)), SMLSIZE)
+    end
+    lcd.drawText(2, LCD_H-8, currentFlightMode, SMLSIZE + INVERS)
+    lcd.drawNumber(3, 2, counter, 0)
+    
+    -- Draw speedometer
+    local speed_kmh = math.floor(calculateSpeed() * 3.6) -- Convert m/s to km/h
+    lcd.drawText(LCD_W-45, 2, speed_kmh .. "km/h", SMLSIZE + INVERS)
   end
+  
+  return 0  -- Make sure this is always the last line
+end
 
-  return 0
+-- Minimal init
+local function init_func()
+  -- Reset gates
+  activeGates[1].x = math.random(-100, 100)
+  activeGates[2].x = math.random(-100, 100)
+  activeGates[1].z = 500
+  activeGates[2].z = 1500
+  activeGates[1].passed = false
+  activeGates[2].passed = false
+end
+
+-- Add compass drawing function
+local function drawCompass()
+  local cx = LCD_W/2
+  local cy = config.display.compass.y
+  local r = config.display.compass.radius
+  
+  -- Draw compass circle
+  lcd.drawCircle(cx, cy, r)
+  
+  -- Draw cardinal directions
+  local yaw = drone.yaw
+  for i, dir in ipairs(config.display.compass.directions) do
+    local angle = math.rad((i-1) * 90) - yaw
+    local x = cx + math.sin(angle) * r
+    local y = cy - math.cos(angle) * r
+    -- Highlight north
+    lcd.drawText(x-2, y-3, dir, dir == "N" and INVERS or 0)
+  end
 end
 
 return { init=init_func, run=run_func }
+
