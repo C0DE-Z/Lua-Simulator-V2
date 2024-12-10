@@ -1,6 +1,6 @@
 # Lua-Simulator V2
-# 🛑 WARNING THIS SCRIPT IS STILL IN DEVELOPMENT SO IT'S LIKELY BROKEN
-## V 0.1 Beta
+### ⚠️ WARNING THIS SCRIPT IS STILL IN DEVELOPMENT  ⚠️ 
+#### V0.2 Beta (Some What functional)
 ![GitHub Stars](https://img.shields.io/github/stars/c0de-z/Lua-Simulator-V2?style=flat-square)
 ![GitHub Issues](https://img.shields.io/github/issues/c0de-z/Lua-Simulator-V2?style=flat-square)
 ![License](https://img.shields.io/github/license/c0de-z/Lua-Simulator-V2)
