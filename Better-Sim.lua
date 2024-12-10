@@ -31,8 +31,11 @@ local config = {
       directions = {"N", "E", "S", "W"}
     },
     ground = {
-      lines = 8,    -- Number of ground perspective lines
-      spacing = 20  -- Spacing between lines
+      lines = 12,        -- Increased number of lines
+      spacing = 15,      -- Reduced spacing for tighter grid
+      gridSize = 200,    -- Size of grid squares
+      fadeStep = 0.8,    -- How quickly lines fade with distance
+      gridLines = 5      -- Number of horizontal grid lines
     }
   },
 }
@@ -60,10 +63,13 @@ local options = {
   {name = "Mode", value = 2, min = 1, max = 3, step = 1,  -- Changed default to 2 (ANGLE)
    labels = {"ACRO", "ANGLE", "HOR"}},
   {name = "Debug", value = 0, min = 0, max = 1, step = 1,
-   labels = {"OFF", "ON"}},
+   labels = {"OFF", "ON"}},  -- Fixed labels for binary options
   {name = "FPS Limit", value = 20, min = 10, max = 30, step = 5},  -- New FPS limit option
   {name = "Frame Skip", value = 0, min = 0, max = 2, step = 1},    -- New frame skip option
   {name = "Turn Rate", value = 100, min = 50, max = 200, step = 10},  -- Added turn rate setting
+  {name = "Invert Controls", value = 0, min = 0, max = 1, step = 1, labels = {"OFF", "ON"}},  -- Fixed labels for binary options
+  {name = "Sound Volume", value = 5, min = 0, max = 10, step = 1},  -- New sound volume setting
+  {name = "Vibration Intensity", value = 5, min = 0, max = 10, step = 1},  -- New vibration intensity setting
   {name = "START", isButton = true}
 }
 
@@ -137,6 +143,13 @@ local function updatePhysics()
   local roll = getValue('ail') / 512
   local pitch = getValue('ele') / 512
   local yaw = getValue('rud') / 512
+  
+  -- Apply invert controls if enabled
+  if options[8].value == 1 then
+    roll = -roll
+    pitch = -pitch
+    yaw = -yaw
+  end
   
   -- Scale inputs
   thr = thr * config.phys.scale.throttle
@@ -250,15 +263,19 @@ end
 
 -- Add feedback functions
 local function playGateSound()
-  -- High-pitched success tone
-  playTone(1500, 100, 0)
-  -- Medium vibration
-  playHaptic(20, 0, 0)
+  -- Adjust sound volume based on setting
+  local volume = options[9].value * 100
+  playTone(1500, 100, 0, volume)
+  
+  -- Adjust vibration intensity based on setting
+  local intensity = options[10].value * 2
+  playHaptic(intensity, 0, 0)
 end
 
 local function playSettingHaptic()
-  -- Light haptic feedback
-  playHaptic(10, 0, 0)
+  -- Adjust vibration intensity based on setting
+  local intensity = options[10].value
+  playHaptic(intensity, 0, 0)
 end
 
 -- Add power optimization helpers after config
@@ -326,14 +343,38 @@ local function drawGround()
   -- Draw horizon line
   lcd.drawLine(0, LCD_H/2, LCD_W, LCD_H/2, SOLID, FORCE)
   
-  -- Draw perspective lines
+  -- Draw perspective lines (vertical)
   local spacing = config.display.ground.spacing
   for i=1, config.display.ground.lines do
     local y = LCD_H/2 + i * spacing
-    local x1 = LCD_W/2 - (i * spacing)
-    local x2 = LCD_W/2 + (i * spacing)
-    lcd.drawLine(x1, y, x2, y, DOTTED, FORCE)
+    local x1 = LCD_W/2 - (i * spacing * 1.5)  -- Wider spread
+    local x2 = LCD_W/2 + (i * spacing * 1.5)
+    -- Fade lines with distance
+    local intensity = math.max(0, 1 - (i/config.display.ground.lines) * config.display.ground.fadeStep)
+    if intensity > 0.3 then  -- Only draw visible lines
+      lcd.drawLine(x1, y, x2, y, DOTTED, FORCE)
+    end
   end
+  
+  -- Draw grid lines (horizontal)
+  local gridSpacing = config.display.ground.gridSize
+  for i=1, config.display.ground.gridLines do
+    local z = i * gridSpacing
+    local scale = config.zScale / z
+    local y = LCD_H/2 + (z * 0.2)  -- Perspective scaling
+    
+    -- Draw multiple horizontal lines for grid effect
+    for j=-3, 3 do
+      local x1 = LCD_W/2 + (j * gridSpacing * scale)
+      local x2 = LCD_W/2 + ((j+1) * gridSpacing * scale)
+      if y < LCD_H then  -- Only draw if in view
+        lcd.drawLine(x1, y, x2, y, DOTTED, FORCE)
+      end
+    end
+  end
+  
+  -- Add center reference line
+  lcd.drawLine(LCD_W/2, LCD_H/2, LCD_W/2, LCD_H, SOLID, FORCE)
 end
 
 -- Simplified run function
