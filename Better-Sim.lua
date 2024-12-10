@@ -10,8 +10,8 @@ local config = {
     air = 0.98,
     maxTilt = math.rad(360),  -- Allow full rotation in ACRO
     scale = {roll = 25, pitch = 25, yaw = 5, throttle = 40, gravity = 0.4}, -- Reduced throttle scaling
-    maxSpeed = 27.7, -- ~100 km/h in m/s
-    maxAltitude = 200,  -- Maximum altitude in meters
+    maxSpeed = 15, -- ~54 km/h max speed (more realistic)
+    maxAltitude = 50,  -- Lower maximum altitude (in meters)
     minAltitude = -5,    -- Minimum altitude (slightly below ground)
     momentum = 0.85, -- Add momentum factor
     groundLevel = 0,  -- Define ground level
@@ -26,8 +26,8 @@ local config = {
   menuBuffer = {},      -- Cache for menu items
   display = {
     compass = {
-      radius = 15,
-      y = 15,
+      radius = 8,  -- Smaller compass
+      y = 10,  -- Move compass up slightly
       directions = {"N", "E", "S", "W"}
     },
     ground = {
@@ -46,10 +46,12 @@ local selectedOption = 1  -- Add this line
 local editingValue = false  -- Add this line
 
 -- Define activeGates before it's used
-local activeGates = {
+local initialGates = {
   {x = 0, y = 0, z = 500, passed = false},  -- Current gate
   {x = 0, y = 0, z = 1500, passed = false}  -- Next gate
 }
+
+local activeGates = {}  -- Will be initialized in init_func
 
 -- Add back original options
 local options = {
@@ -175,10 +177,20 @@ local function updatePhysics()
     speed.z = (-pitch * config.phys.scale.pitch) * config.phys.air
   end
   
-  -- Update position with ground constraint
+  -- Add speed cap
+  local currentSpeed = math.sqrt(speed.x^2 + speed.y^2 + speed.z^2)
+  if currentSpeed > config.phys.maxSpeed then
+    local factor = config.phys.maxSpeed / currentSpeed
+    speed.x = speed.x * factor
+    speed.y = speed.y * factor
+    speed.z = speed.z * factor
+  end
+
+  -- Update position with ground and altitude constraints
   drone.x = drone.x + speed.x
-  drone.y = math.max(config.phys.groundLevel, 
-                    drone.y + speed.y)
+  drone.y = math.min(config.phys.maxAltitude,
+                    math.max(config.phys.groundLevel, 
+                    drone.y + speed.y))
   drone.z = drone.z + speed.z
   
   -- Ground collision
@@ -275,19 +287,37 @@ local function drawHorizon()
   lcd.drawLine(cx - dx, cy - dy + py, cx + dx, cy + dy + py, SOLID, FORCE)
 end
 
--- Replace the drawNavArrow function
-local function drawNavArrow()
-  local nextGate = activeGates[1]
-  if nextGate.z > drone.z then
-    local dx = nextGate.x - drone.x
-    local dz = nextGate.z - drone.z
-    
-    -- Calculate relative angle to gate accounting for drone's yaw
-    local targetAngle = math.atan2(dx, dz)
-    local relativeAngle = (targetAngle - drone.yaw) % (2 * math.pi)
-    
-    -- Draw arrow at bottom of screen
-    drawArrow(LCD_W/2, LCD_H-10, relativeAngle, 15)
+-- Move compass drawing function before run_func
+local function drawCompass()
+  local cx = LCD_W/2
+  local cy = config.display.compass.y
+  local r = config.display.compass.radius
+  
+  -- Draw compass circle
+  if lcd.drawCircle then
+    lcd.drawCircle(cx, cy, r)
+  else
+    -- Fallback if drawCircle not available
+    local steps = 16
+    local angleStep = 2 * math.pi / steps
+    local x1, y1 = cx + r, cy
+    for i = 1, steps do
+      local angle = i * angleStep
+      local x2 = cx + r * math.cos(angle)
+      local y2 = cy + r * math.sin(angle)
+      lcd.drawLine(x1, y1, x2, y2, SOLID, FORCE)
+      x1, y1 = x2, y2
+    end
+  end
+  
+  -- Draw cardinal directions
+  local yaw = drone.yaw
+  for i, dir in ipairs(config.display.compass.directions) do
+    local angle = math.rad((i-1) * 90) - yaw
+    local x = cx + math.sin(angle) * r
+    local y = cy - math.cos(angle) * r
+    -- Highlight north
+    lcd.drawText(x-2, y-3, dir, dir == "N" and INVERS or 0)
   end
 end
 
@@ -427,7 +457,6 @@ local function run_func(event)
     for _, gate in ipairs(activeGates) do
       drawGate(gate)
     end
-    drawNavArrow()  -- Always show navigation arrow
     
     -- Show HUD
     if showDebug then
@@ -449,33 +478,29 @@ end
 
 -- Minimal init
 local function init_func()
-  -- Reset gates
+  -- Create fresh copies of gates
+  activeGates = {}
+  for i, gate in ipairs(initialGates) do
+    activeGates[i] = {
+      x = gate.x,
+      y = gate.y,
+      z = gate.z,
+      passed = gate.passed
+    }
+  end
+
+  -- Reset gates positions
   activeGates[1].x = math.random(-100, 100)
   activeGates[2].x = math.random(-100, 100)
   activeGates[1].z = 500
   activeGates[2].z = 1500
   activeGates[1].passed = false
   activeGates[2].passed = false
-end
-
--- Add compass drawing function
-local function drawCompass()
-  local cx = LCD_W/2
-  local cy = config.display.compass.y
-  local r = config.display.compass.radius
   
-  -- Draw compass circle
-  lcd.drawCircle(cx, cy, r)
-  
-  -- Draw cardinal directions
-  local yaw = drone.yaw
-  for i, dir in ipairs(config.display.compass.directions) do
-    local angle = math.rad((i-1) * 90) - yaw
-    local x = cx + math.sin(angle) * r
-    local y = cy - math.cos(angle) * r
-    -- Highlight north
-    lcd.drawText(x-2, y-3, dir, dir == "N" and INVERS or 0)
-  end
+  -- Reset other state
+  drone = {x = 0, y = 0, z = 0, roll = 0, pitch = 0, yaw = 0}
+  speed = {x = 0, y = 0, z = 0}
+  counter = 0
 end
 
 return { init=init_func, run=run_func }
